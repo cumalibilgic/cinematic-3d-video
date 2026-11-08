@@ -1,0 +1,6 @@
+node_modules/
+*.partial.mp4
+stills/
+frames/
+.DS_Store
+Thumbs.db
