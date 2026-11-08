@@ -35,14 +35,17 @@ Kurulumdan sonra yeni bir terminal aç. Chrome veya Edge kuruluysa otomatik bulu
 ## Hızlı başlangıç
 
 ```powershell
-# 1. Araç zincirini dene (indirme yok, 2 saniyelik video)
+# 1. Gerekli yerel araçların bulunup bulunmadığını kontrol et
+node scripts\render.mjs --doctor
+
+# 2. WebGL ve video kodlamayı dene (2 saniyelik video)
 node scripts\render.mjs templates\smoke-test.html --out smoke.mp4 --duration 2 --width 640 --height 360
 
-# 2. Başlangıç sahnesini kopyala ve birkaç kareye bak
+# 3. Başlangıç sahnesini kopyala ve birkaç kareye bak
 Copy-Item -Recurse templates\starter my-video
 node scripts\render.mjs my-video\index.html --stills 0,3,5.6,7.5 --out my-video\stills
 
-# 3. Tam videoyu render et (--scale 2: daha pürüzsüz kenarlar)
+# 4. Tam videoyu render et (--scale 2: daha pürüzsüz kenarlar)
 node scripts\render.mjs my-video\index.html --out my-video\video.mp4 --scale 2
 
 # Tarayıcıda canlı önizleme

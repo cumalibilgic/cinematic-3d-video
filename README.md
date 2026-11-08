@@ -43,14 +43,17 @@ A GPU is not required but makes rendering much faster. The log prints which WebG
 ## Quick start
 
 ```bash
-# 1. prove the toolchain works (no downloads, 2 seconds of video)
+# 1. check that the required local tools are available
+node scripts/render.mjs --doctor
+
+# 2. prove WebGL and encoding work (2 seconds of video)
 node scripts/render.mjs templates/smoke-test.html --out smoke.mp4 --duration 2 --width 640 --height 360
 
-# 2. copy the starter scene and look at a few frames
+# 3. copy the starter scene and look at a few frames
 cp -r templates/starter my-video
 node scripts/render.mjs my-video/index.html --stills 0,3,5.6,7.5 --out my-video/stills
 
-# 3. render the full video (2x supersampling for smooth edges)
+# 4. render the full video (2x supersampling for smooth edges)
 node scripts/render.mjs my-video/index.html --out my-video/video.mp4 --scale 2
 
 # live preview in a browser tab (real-time loop)

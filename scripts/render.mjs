@@ -10,6 +10,7 @@
  * Zero npm dependencies: needs Node 22+ (global WebSocket), ffmpeg on PATH, and Chrome or Edge.
  *
  * Usage
+ *   node render.mjs --doctor                              check the local toolchain
  *   node render.mjs scene.html --out video.mp4 [options]      render a video
  *   node render.mjs scene.html --stills 0,2.5,5 --out stills  render PNG stills for a quick look
  *   node render.mjs scene.html --serve                        just serve the folder for live preview
@@ -84,9 +85,16 @@ function startServer(root, port = 0) {
 
 // ---------------------------------------------------------------- chrome
 function which(name) {
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
+    : [''];
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-    const p = path.join(dir, name);
-    if (dir && fs.existsSync(p)) return p;
+    if (!dir) continue;
+    const candidates = path.extname(name) ? [name] : extensions.map((ext) => name + ext);
+    for (const candidate of candidates) {
+      const p = path.join(dir, candidate);
+      if (fs.existsSync(p)) return p;
+    }
   }
   return null;
 }
@@ -110,6 +118,30 @@ function findChrome() {
     }
   }
   return c.find((p) => fs.existsSync(p)) || null;
+}
+
+function runDoctor() {
+  let failed = false;
+  const report = (label, ok, detail) => {
+    console.log(`${ok ? 'OK' : 'MISSING'}  ${label}${detail ? ` — ${detail}` : ''}`);
+    if (!ok) failed = true;
+  };
+
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  report('Node.js 22+', Number.isFinite(nodeMajor) && nodeMajor >= 22, `v${process.versions.node}`);
+  report('Built-in WebSocket', typeof globalThis.WebSocket === 'function',
+    typeof globalThis.WebSocket === 'function' ? 'available' : 'upgrade Node.js to 22 or newer');
+
+  const ffmpegPath = which('ffmpeg');
+  report('FFmpeg', Boolean(ffmpegPath), ffmpegPath || 'install FFmpeg and add it to PATH');
+
+  const chromePath = findChrome();
+  report('Chrome or Edge', Boolean(chromePath), chromePath || 'install Chrome/Edge or set CHROME_PATH');
+
+  console.log(failed
+    ? '\nToolchain is incomplete. Follow the install steps in README.md, then run --doctor again.'
+    : '\nToolchain checks passed. Run the smoke-test render to verify WebGL and video encoding.');
+  return !failed;
 }
 
 async function launchChrome(chromePath, { software, width, height }) {
@@ -229,6 +261,10 @@ const GL_PROBE = `(() => {
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   const scene = o._[0];
+  if (o.doctor) {
+    if (!runDoctor()) process.exitCode = 1;
+    return;
+  }
   if (o.help || !scene) { console.log(fs.readFileSync(new URL(import.meta.url), 'utf8').match(/\/\*\*([\s\S]*?)\*\//)[1].replace(/^ \* ?/gm, '')); return; }
   if (!fs.existsSync(scene)) die(`scene file not found: ${scene}`);
 
