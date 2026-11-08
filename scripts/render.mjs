@@ -48,7 +48,9 @@ function parseArgs(argv) {
   }
   return o;
 }
-const die = (msg) => { console.error('\nError: ' + msg); process.exit(1); };
+// Throw instead of exiting immediately so `finally` blocks can close Chrome,
+// the DevTools socket, the local server, and any temporary render files.
+const die = (msg) => { throw new Error(msg); };
 const num = (v, d) => (v === undefined || v === true ? d : Number(v));
 
 // ---------------------------------------------------------------- static server
@@ -341,4 +343,10 @@ async function main() {
   }
 }
 
-main().then(() => process.exit(0), (e) => { console.error('\nError: ' + (e && e.message ? e.message : e)); process.exit(1); });
+// Do not force process.exit(0): an active --serve HTTP server must keep the
+// event loop alive until the user presses Ctrl+C. Setting exitCode on errors
+// still lets Node drain/close resources created by the renderer.
+main().catch((e) => {
+  console.error('\nError: ' + (e && e.message ? e.message : e));
+  process.exitCode = 1;
+});
