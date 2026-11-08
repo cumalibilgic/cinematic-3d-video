@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3D video starter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
+  canvas { display: block; }
+  /* HTML overlays are captured in the video too, so titles/captions can be plain CSS. */
+  #title {
+    position: absolute; left: 7vw; bottom: 12vh; color: #fff; pointer-events: none;
+    font: 700 6.2vh/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif; letter-spacing: .04em; text-transform: uppercase;
+    text-shadow: 0 0 2.4vh rgba(80, 220, 255, .55);
+  }
+  #title small { display: block; margin-top: 1.6vh; font-weight: 400; font-size: 2.2vh; letter-spacing: .28em; opacity: .75; }
+</style>
+<!-- Three.js from a CDN. For offline use: `npm i three` next to this file and point the two URLs
+     at ./node_modules/three/build/three.module.js and ./node_modules/three/examples/jsm/ -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="title" style="opacity:0">YOUR TITLE<small>SUBTITLE GOES HERE</small></div>
+
+<script type="module">
+import { THREE, createStage, installTimeline, ease, seg, keys, rng, clamp01 } from './lib/stage.js';
+
+const DURATION = 8; // seconds
+
+const stage = createStage({ background: 0x04050a, bloom: { strength: 0.9, radius: 0.7, threshold: 0.8 } });
+const { scene, camera } = stage;
+scene.fog = new THREE.FogExp2(0x04050a, 0.045);
+
+// ---- hero object: glossy metal torus knot -------------------------------------------------
+const hero = new THREE.Mesh(
+  new THREE.TorusKnotGeometry(1, 0.34, 320, 56, 2, 3),
+  new THREE.MeshPhysicalMaterial({ color: 0x9fb0ff, metalness: 1, roughness: 0.16, clearcoat: 1, clearcoatRoughness: 0.08 })
+);
+hero.castShadow = true;
+scene.add(hero);
+
+// ---- glowing rings: HDR colours (> 1) so the bloom pass picks them up ----------------------
+const glow = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
+const rings = [0, 1, 2].map((i) => {
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(2.1 + i * 0.55, 0.012, 16, 256),
+    new THREE.MeshBasicMaterial({ color: glow(i % 2 ? 0xff2d95 : 0x2de2ff, 4) })
+  );
+  m.rotation.x = Math.PI / 2;
+  scene.add(m);
+  return m;
+});
+
+// ---- reflective floor ------------------------------------------------------------------------
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(40, 96),
+  new THREE.MeshStandardMaterial({ color: 0x080a12, metalness: 0.85, roughness: 0.28 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -2.1;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// ---- lights: key (shadow) + two coloured rim lights ----------------------------------------
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(4, 7, 5);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 0.5, far: 25 });
+key.shadow.bias = -0.0004;
+scene.add(key);
+const rimA = new THREE.PointLight(0xff2d95, 90, 0, 2);
+const rimB = new THREE.PointLight(0x2de2ff, 90, 0, 2);
+scene.add(rimA, rimB);
+
+// ---- particles: seeded, so every run is identical -------------------------------------------
+const rand = rng(7);
+const N = 900, pos = new Float32Array(N * 3);
+for (let i = 0; i < N; i++) {
+  const r = 3 + rand() * 9, a = rand() * Math.PI * 2, y = (rand() - 0.35) * 8;
+  pos.set([Math.cos(a) * r, y, Math.sin(a) * r], i * 3);
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+  size: 0.035, color: 0xbfe9ff, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending,
+}));
+scene.add(dust);
+
+// ---- camera path (seconds -> [x, y, z]) -----------------------------------------------------
+const camPath = [[0, [0.0, 1.0, 11]], [3, [5.2, 1.8, 6.4]], [6, [0.4, 0.5, 4.4]], [DURATION, [-3.2, 1.2, 5.6]]];
+const lookPath = [[0, [0, 0.2, 0]], [DURATION, [0, 0.1, 0]]];
+const titleEl = document.getElementById('title');
+
+// ---- everything animated is a pure function of t ---------------------------------------------
+function update(t) {
+  const reveal = seg(t, 0.2, 1.6, ease.outBack);
+  hero.scale.setScalar(Math.max(0.0001, reveal));
+  hero.rotation.set(t * 0.35, t * 0.6, 0);
+
+  rings.forEach((r, i) => {
+    r.rotation.z = t * (0.25 + i * 0.12) * (i % 2 ? -1 : 1);
+    r.scale.setScalar(seg(t, 0.8 + i * 0.25, 1.4, ease.outExpo));
+  });
+
+  rimA.position.set(Math.cos(t * 0.8) * 5, 2.5, Math.sin(t * 0.8) * 5);
+  rimB.position.set(Math.cos(t * 0.8 + Math.PI) * 5, 1.0, Math.sin(t * 0.8 + Math.PI) * 5);
+
+  dust.rotation.y = t * 0.05;
+
+  const [cx, cy, cz] = keys(camPath, t, ease.inOutSine);
+  camera.position.set(cx, cy, cz);
+  camera.lookAt(...keys(lookPath, t));
+
+  const a = seg(t, 4.6, 1.0, ease.outCubic), b = 1 - seg(t, 7.2, 0.7, ease.inOutSine);
+  titleEl.style.opacity = String(clamp01(a * b));
+  titleEl.style.transform = `translateY(${(1 - a) * 2.5}vh)`;
+
+  // fade in from black at the start
+  stage.renderer.toneMappingExposure = 0.2 + 0.8 * seg(t, 0, 0.8, ease.outCubic);
+}
+
+installTimeline({ duration: DURATION, update, render: stage.render });
+</script>
+</body>
+</html>
