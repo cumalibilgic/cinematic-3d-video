@@ -4,3 +4,4 @@ stills/
 frames/
 .DS_Store
 Thumbs.db
+*.work/

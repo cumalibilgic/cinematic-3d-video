@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Toolchain check
+        run: node scripts/render.mjs --doctor
+      - name: Self-test (renderer, motion blur, alpha, audio, workers, cache)
+        run: node scripts/selftest.mjs
+      # The starter scene needs Three.js from the CDN, which the self-test deliberately avoids.
+      # Rendering it here proves the real scene still works and leaves stills to look at.
+      - name: Render the starter scene
+        run: |
+          cp -r templates/starter /tmp/starter
+          node scripts/render.mjs /tmp/starter/index.html --stills 0,2,4,6,7.5 --sheet --out stills --width 960 --height 540
+          node scripts/render.mjs /tmp/starter/index.html --out starter.mp4 --duration 1 --width 640 --height 360
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starter-stills
+          path: |
+            stills
+            starter.mp4

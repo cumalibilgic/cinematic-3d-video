@@ -52,6 +52,36 @@ node scripts\render.mjs my-video\index.html --out my-video\video.mp4 --scale 2
 node scripts\render.mjs my-video\index.html --serve
 ```
 
+Ek seçenekler (hepsi `node scripts\render.mjs --help` çıktısında):
+
+```powershell
+# Tüm kareleri tek resimde gör (kontak sayfası)
+node scripts\render.mjs my-video\index.html --stills 0,2,4,6 --sheet --out my-video\stills
+
+# Sinematik hareket bulanıklığı: kare başına 8 alt kare
+node scripts\render.mjs my-video\index.html --out video.mp4 --blur 8 --shutter 0.5
+
+# Tüm çekirdekleri kullan: 4 Chrome aynı anda farklı bölümleri render eder
+node scripts\render.mjs my-video\index.html --out video.mp4 --workers 4
+
+# Saydam arka plan (WebM VP9 ya da ProRes 4444 için .mov)
+node scripts\render.mjs my-video\index.html --out logo.webm --alpha
+
+# Müzik: videoya eklenir, ses şiddeti (rms/low/mid/high) sahnede audio(t) ile okunur
+node scripts\render.mjs my-video\index.html --out video.mp4 --audio muzik.mp3
+```
+
+Sayfanın başka sitelerden indirdiği her şey (CDN'deki Three.js, yazı tipleri, modeller) ilk render'da
+`~/.cache/cinematic-3d-video` klasörüne kaydedilir; sonraki render'lar internetsiz de çalışır (`--no-cache` ile kapanır).
+
+## Test
+
+```powershell
+node scripts\selftest.mjs     # yaklaşık 2 dakika; Node, ffmpeg ve Chrome yeterli, internet gerekmez
+```
+
+GitHub Actions bunu her push'ta çalıştırır ve başlangıç sahnesini de render edip karelerini (stills) çıktı olarak ekler.
+
 Ya da doğrudan Claude'a söyle: *"'AURORA' için 10 saniyelik, parlayan halkalı, yavaş kamera dönüşlü sinematik 3D intro
 yap, dikey 1080x1920."*
 
@@ -59,6 +89,7 @@ yap, dikey 1080x1920."*
 
 - `SKILL.md`: Claude'un izlediği talimatlar
 - `scripts/render.mjs`: bağımlılıksız render aracı
+- `scripts/selftest.mjs`: uçtan uca testler
 - `templates/smoke-test.html`: araç zincirini doğrulayan test sahnesi
 - `templates/starter/`: Three.js başlangıç sahnesi (parlak nesne, halkalar, parçacıklar, bloom, kamera yolu, başlık)
 - `templates/blender/`: Blender şablonu (Cycles, varsa GPU)
@@ -66,7 +97,9 @@ yap, dikey 1080x1920."*
 
 ## Durum
 
-Render hattı ve animasyon yardımcıları test edildi. Başlangıç sahnesinin görünümü (ışık şiddetleri, bloom) göz ile
+Render hattı ve animasyon yardımcıları `scripts/selftest.mjs` ile test ediliyor (CI'da da çalışır). Yükseklik en az 160 px
+olmalı (daha kısa görünüm Chrome'u kilitliyor, araç bunu reddeder). `--alpha` sayfa arka planını saydam yapar; Three.js
+sahnesinde de saydam clear color gerekir, başlangıç sahnesinin bloom'u alpha ile henüz denenmedi. Başlangıç sahnesinin görünümü (ışık şiddetleri, bloom) göz ile
 değil mantıkla ayarlandı; ilk gerçek render'da ayar yapman gerekebilir. Blender şablonu yazıldığı ortamda
 çalıştırılamadı, ilk çalıştırmayı test olarak gör.
 

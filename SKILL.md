@@ -24,8 +24,8 @@ ffmpeg -version
 ```
 
 Chrome, Edge or Chromium must be installed (found automatically; set `CHROME_PATH` to override). Three.js is loaded
-from a CDN by the scene, so the machine that renders needs internet access unless Three.js is vendored (see
-`references/troubleshooting.md`). If a tool is missing, tell the user exactly what to install and stop guessing at
+from a CDN by the scene; the renderer caches every remote file in `~/.cache/cinematic-3d-video` on first use, so only
+the very first render needs internet (or vendor Three.js, see `references/troubleshooting.md`). If a tool is missing, tell the user exactly what to install and stop guessing at
 workarounds. Blender is only needed for the photoreal path.
 
 Run the dependency-free smoke test once when a machine is new. It proves Chrome, WebGL and ffmpeg all work, so any
@@ -49,12 +49,15 @@ node <skill-dir>/scripts/render.mjs <skill-dir>/templates/smoke-test.html --out 
    ```bash
    node <skill-dir>/scripts/render.mjs my-video/index.html --stills 0,2,4,6,7.5 --out my-video/stills
    ```
+   Add `--sheet` to get all stills in one `sheet.png` (labelled with their times) and look at that single image.
    Fix composition, exposure, colour and text legibility here. A still takes a second or two; a full render takes minutes.
 4. **Render once.** Pick the settings, then render the whole video:
    ```bash
    node <skill-dir>/scripts/render.mjs my-video/index.html --out my-video/video.mp4 --width 1920 --height 1080 --fps 30 --scale 2
    ```
    `--scale 2` renders at 2x and downsamples, which removes shimmering edges (worth it for the final render only).
+   Final-render extras: `--blur 8` for motion blur on fast moves (multiplies render time by 8), `--workers 4` to split the
+   frames over parallel Chrome instances (use about as many as CPU cores, mainly helps without a GPU).
    Long renders belong in the background with progress polled, so the user is never left staring at a silent terminal.
 5. **Verify the file, not the log.** `ffprobe` for duration, size and fps; pull two or three frames out of the MP4
    (`ffmpeg -ss 3 -i video.mp4 -frames:v 1 check.png`) and look at them. Then hand over the MP4 plus the scene
@@ -86,8 +89,14 @@ node <skill-dir>/scripts/render.mjs <skill-dir>/templates/smoke-test.html --out 
   `ffmpeg -f concat -safe 0 -i list.txt -c copy out.mp4`. Put crossfades inside a scene's own timeline (the last second
   of one scene and first second of the next both fade through black/colour) rather than blending finished files,
   which would encode everything twice.
-- **Audio:** `--audio track.mp3` muxes it in and trims to the video. To change only the sound later:
+- **Audio:** `--audio track.mp3` muxes it in and trims to the video (aligned with `--start` too). To change only the sound later:
   `ffmpeg -i video.mp4 -i new.mp3 -map 0:v -map 1:a -c:v copy -shortest out.mp4`.
+- **Music-reactive scenes:** with `--audio`, the loudness is analysed up front and exposed to the page, so a scene can
+  stay a pure function of `t`: `import { audio } from './lib/stage.js'; const { low, mid, high, rms } = audio(t);`
+  (each 0..1; `low` is the bass). Use it for scale pulses, light intensity, bloom strength. Without `--audio` it returns zeros.
+- **Transparent video:** `--alpha --out clip.webm` (or `.mov`, ProRes 4444). The scene must have a transparent background
+  (no `scene.background`, a transparent clear colour, `body { background: transparent }`); check one still first.
+  The page can read `--query alpha` from `location.search` to switch its background off.
 - **GIF / WebM / smaller copy:** re-encode the finished MP4 with ffmpeg; never re-render for a format change.
 - **Changing one scene** means re-rendering that scene's file (and the next one only if a crossfade lives in it).
 

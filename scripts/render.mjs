@@ -14,6 +14,7 @@
  *   node render.mjs scene.html --out video.mp4 [options]      render a video
  *   node render.mjs scene.html --stills 0,2.5,5 --out stills  render PNG stills for a quick look
  *   node render.mjs scene.html --serve                        just serve the folder for live preview
+ *   node render.mjs scene.html --stills 0,2,4 --sheet --out stills   also write a contact sheet (stills/sheet.png)
  *
  * Options
  *   --width 1920 --height 1080   output size in pixels (both must be even)
@@ -27,9 +28,20 @@
  *   --gl auto|gpu|software       WebGL backend. auto = GPU, falls back to software if there is no WebGL
  *   --timeout 60                 seconds to wait for the scene to set window.__ready
  *   --root dir                   folder served to the page (default: the scene's folder)
+ *   --query "a=1&b"              append a query string to the scene URL (the page can read it from location.search)
  *   --verbose                    print the page's console.log output as well
+ *   --blur 8 --shutter 0.5       motion blur: average N sub-frames spread over a shutter of 0.5 frame
+ *   --alpha                      transparent background; out must end in .webm (VP9) or .mov (ProRes 4444)
+ *   --workers 4                  render with N parallel Chrome instances (big win on software WebGL / many cores)
+ *   --sheet                      with --stills: also write sheet.png, all stills in one image
+ *   --no-cache                   do not cache remote files (CDN) on disk; default caches them so renders work offline
+ *   --cache-dir dir              cache location (default ~/.cache/cinematic-3d-video)
+ *
+ * Audio: with --audio the loudness envelope (rms/low/mid/high, 60 per second, 0..1) is injected as
+ * window.__audio before the page loads; see audio() in templates/starter/lib/math.js.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +64,7 @@ function parseArgs(argv) {
 // Throw instead of exiting immediately so `finally` blocks can close Chrome,
 // the DevTools socket, the local server, and any temporary render files.
 const die = (msg) => { throw new Error(msg); };
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms).unref())]);
 const num = (v, d) => (v === undefined || v === true ? d : Number(v));
 
 // ---------------------------------------------------------------- static server
@@ -205,7 +218,74 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* already closed */ } }
 }
 
-async function openSession(chromePath, { software, width, height, scale, verbose }) {
+
+// ---------------------------------------------------------------- remote file cache
+// Everything the page loads from another origin (Three.js on a CDN, fonts, models) is stored on disk the
+// first time and served from there afterwards, so a scene keeps rendering offline and loads faster.
+async function enableCache(cdp, S, sessionId, { dir, origin }) {
+  fs.mkdirSync(dir, { recursive: true });
+  const drop = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
+  await S('Fetch.enable', { patterns: [{ urlPattern: 'http*', requestStage: 'Request' }, { urlPattern: 'http*', requestStage: 'Response' }] });
+  cdp.on(async (m) => {
+    if (m.sessionId !== sessionId || m.method !== 'Fetch.requestPaused') return;
+    const { requestId, request, responseStatusCode, responseHeaders } = m.params;
+    const proceed = () => (responseStatusCode === undefined
+      ? S('Fetch.continueRequest', { requestId })
+      : S('Fetch.continueResponse', { requestId }).catch(() => S('Fetch.continueRequest', { requestId })));
+    try {
+      const remote = request.method === 'GET' && /^https?:/.test(request.url) && !request.url.startsWith(origin);
+      if (!remote) return await proceed();
+      const key = path.join(dir, crypto.createHash('sha1').update(request.url).digest('hex'));
+      if (responseStatusCode === undefined) {
+        if (fs.existsSync(key + '.json') && fs.existsSync(key + '.bin')) {
+          const meta = JSON.parse(fs.readFileSync(key + '.json', 'utf8'));
+          return await S('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: meta.headers, body: fs.readFileSync(key + '.bin').toString('base64') });
+        }
+        return await proceed();
+      }
+      if (responseStatusCode === 200 && !fs.existsSync(key + '.bin')) {
+        const r = await S('Fetch.getResponseBody', { requestId });
+        const body = Buffer.from(r.body, r.base64Encoded ? 'base64' : 'utf8');
+        const headers = (responseHeaders || []).filter((h) => !drop.has(h.name.toLowerCase()));
+        if (!headers.some((h) => h.name.toLowerCase() === 'access-control-allow-origin')) headers.push({ name: 'Access-Control-Allow-Origin', value: '*' });
+        fs.writeFileSync(key + '.bin', body);
+        fs.writeFileSync(key + '.json', JSON.stringify({ url: request.url, headers }));
+      }
+      await proceed();
+    } catch { try { await proceed(); } catch { /* request already finished */ } }
+  });
+}
+
+// ---------------------------------------------------------------- audio analysis
+// Loudness envelope of the soundtrack so a scene can react to the music: rms plus three bands
+// (low < 200 Hz, mid, high > 2 kHz), 60 samples per second, each scaled to 0..1.
+function analyseAudio(file, seconds) {
+  const sr = 8000, rate = 60, win = Math.round(sr / rate);
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-t', String(seconds), '-ac', '1', '-ar', String(sr), '-f', 's16le', '-'], { maxBuffer: 1 << 30 });
+  if (r.error || r.status !== 0) die(`could not decode the audio file: ${file}${r.stderr?.length ? '\n' + r.stderr : ''}`);
+  const buf = r.stdout, frames = Math.floor(buf.length / 2 / win);
+  const aLow = 1 - Math.exp(-2 * Math.PI * 200 / sr), aMid = 1 - Math.exp(-2 * Math.PI * 2000 / sr);
+  const out = { rate, rms: [], low: [], mid: [], high: [] };
+  let y1 = 0, y2 = 0;
+  for (let f = 0; f < frames; f++) {
+    let s = 0, l = 0, m = 0, h = 0;
+    for (let i = 0; i < win; i++) {
+      const x = buf.readInt16LE((f * win + i) * 2) / 32768;
+      y1 += aLow * (x - y1); y2 += aMid * (x - y2);
+      const mi = y2 - y1, hi = x - y2;
+      s += x * x; l += y1 * y1; m += mi * mi; h += hi * hi;
+    }
+    out.rms.push(Math.sqrt(s / win)); out.low.push(Math.sqrt(l / win)); out.mid.push(Math.sqrt(m / win)); out.high.push(Math.sqrt(h / win));
+  }
+  for (const k of ['rms', 'low', 'mid', 'high']) {
+    const sorted = [...out[k]].sort((a, b) => a - b);
+    const ref = sorted[Math.floor(sorted.length * 0.99)] || 1e-9; // 99th percentile: one click does not flatten the rest
+    out[k] = out[k].map((v) => Math.round(Math.min(1, v / ref) * 1000) / 1000);
+  }
+  return out;
+}
+
+async function openSession(chromePath, { software, width, height, scale, verbose, alpha, cache, audio }) {
   const chrome = await launchChrome(chromePath, { software, width, height });
   const cdp = await CDP.connect(chrome.wsUrl);
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -216,6 +296,9 @@ async function openSession(chromePath, { software, width, height, scale, verbose
   await S('Log.enable');
   await S('Network.enable');
   await S('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: scale, mobile: false });
+  if (alpha) await S('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } });
+  if (audio) await S('Page.addScriptToEvaluateOnNewDocument', { source: `window.__audio = ${JSON.stringify(audio)};` });
+  if (cache) await enableCache(cdp, S, sessionId, cache);
   const urls = new Map();
   cdp.on((m) => {
     if (m.sessionId !== sessionId) return;
@@ -280,102 +363,208 @@ async function main() {
 
   const width = num(o.width, 1920), height = num(o.height, 1080), fps = num(o.fps, 30), scale = num(o.scale, 1);
   if (width % 2 || height % 2) die('--width and --height must be even numbers (required by yuv420p/H.264)');
+  // Headless Chrome stops answering screenshot requests when the viewport is shorter than about 160 px.
+  if (height < 160) die('--height must be at least 160 (shorter viewports make headless Chrome hang). Render larger and downscale the file with ffmpeg if you need a tiny video.');
   const stills = o.stills && o.stills !== true ? String(o.stills).split(',').map(Number) : null;
   if (stills && stills.some(Number.isNaN)) die('--stills must be a comma-separated list of seconds, e.g. 0,2.5,5');
-  const out = o.out && o.out !== true ? o.out : (stills ? 'stills' : 'out.mp4');
-  const usePng = !!o.png;
+  const alpha = !!o.alpha;
+  const out = o.out && o.out !== true ? o.out : (stills ? 'stills' : alpha ? 'out.webm' : 'out.mp4');
+  const ext = path.extname(out).toLowerCase();
+  if (!stills && alpha && !['.webm', '.mov'].includes(ext)) die('--alpha needs an output ending in .webm (VP9) or .mov (ProRes 4444), e.g. --out logo.webm');
+  const usePng = !!o.png || alpha;
+  const blur = Math.max(1, Math.round(num(o.blur, 1)));
+  const shutter = num(o.shutter, 0.5);
+  const workers = Math.max(1, Math.round(num(o.workers, 1)));
+  const audioFile = o.audio && o.audio !== true ? o.audio : null;
+  if (audioFile && !fs.existsSync(audioFile)) die(`audio file not found: ${audioFile}`);
 
   const chromePath = findChrome();
   if (!chromePath) die('Chrome/Edge not found. Install Google Chrome or set CHROME_PATH to its executable.');
 
   const { server, port } = await startServer(root);
-  const url = `http://127.0.0.1:${port}/${rel}`;
-  const sessionOpts = { width, height, scale, verbose: !!o.verbose };
-  let session; let glName = null;
+  const origin = `http://127.0.0.1:${port}`;
+  const url = `${origin}/${rel}${o.query && o.query !== true ? '?' + String(o.query).replace(/^\?/, '') : ''}`;
+  const cache = o.cache === false || o['no-cache'] ? null
+    : { dir: o['cache-dir'] && o['cache-dir'] !== true ? path.resolve(o['cache-dir']) : path.join(os.homedir(), '.cache', 'cinematic-3d-video'), origin };
+
   const mode = o.gl && o.gl !== true ? o.gl : 'auto';
+  const sessions = [];
+  const workDir = stills ? null : `${path.resolve(out)}.work`;
   try {
-    session = await openSession(chromePath, { ...sessionOpts, software: mode === 'software' });
-    glName = await evaluate(session.S, GL_PROBE);
+    let software = mode === 'software';
+    const open = async (sw, audio) => {
+      const s = await openSession(chromePath, { width, height, scale, verbose: !!o.verbose, alpha, cache, audio, software: sw });
+      sessions.push(s);
+      return s;
+    };
+    const closeAll = async () => { while (sessions.length) await sessions.pop().close(); };
+
+    // The audio envelope needs the video length, which comes from the scene, so the first page load is a probe
+    // of the WebGL backend only; real sessions are opened after the duration is known.
+    let probe = await open(software);
+    let glName = await evaluate(probe.S, GL_PROBE);
     if (!glName && mode === 'auto') {
-      await session.close();
+      await closeAll();
       console.error('No hardware WebGL in headless Chrome, switching to software rendering (slower).');
-      session = await openSession(chromePath, { ...sessionOpts, software: true });
-      glName = await evaluate(session.S, GL_PROBE);
+      software = true;
+      probe = await open(true);
+      glName = await evaluate(probe.S, GL_PROBE);
     }
     if (!glName) die('WebGL is not available in headless Chrome on this machine. Try --gl software.');
     console.error(`WebGL renderer: ${glName}`);
 
-    const { S } = session;
-    await S('Page.navigate', { url });
-    const deadline = Date.now() + num(o.timeout, 60) * 1000;
-    while (!(await evaluate(S, 'window.__ready === true'))) {
-      if (Date.now() > deadline) die('The scene never set window.__ready = true. See references/contract.md (check the page console output above for errors).');
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    if (!(await evaluate(S, 'typeof window.seek === "function"'))) die('The scene did not define window.seek(t). See references/contract.md.');
+    const prepare = async (S) => {
+      await S('Page.navigate', { url });
+      const deadline = Date.now() + num(o.timeout, 60) * 1000;
+      while (!(await evaluate(S, 'window.__ready === true'))) {
+        if (Date.now() > deadline) die('The scene never set window.__ready = true. See references/contract.md (check the page console output above for errors).');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!(await evaluate(S, 'typeof window.seek === "function"'))) die('The scene did not define window.seek(t). See references/contract.md.');
+    };
 
-    const sceneDuration = await evaluate(S, 'window.__duration');
+    await prepare(probe.S);
+    const sceneDuration = await evaluate(probe.S, 'window.__duration');
     const t0 = num(o.start, 0);
     const t1 = o.end !== undefined ? num(o.end, 0) : num(o.duration, undefined) !== undefined ? t0 + num(o.duration) : sceneDuration;
     if (!stills && !(t1 > t0)) die('Unknown duration: pass --duration, or have the scene set window.__duration.');
 
-    const grab = async (t) => {
+    let audio = null;
+    if (audioFile && !stills) {
+      audio = analyseAudio(audioFile, t1 + 1);
+      console.error(`Audio envelope: ${audio.rms.length} samples (${audio.rate}/s) injected as window.__audio`);
+      await closeAll();
+      probe = await open(software, audio);
+      await prepare(probe.S);
+    } else if (audioFile && stills) {
+      const a = analyseAudio(audioFile, Math.max(...stills) + 1);
+      await closeAll();
+      probe = await open(software, a);
+      await prepare(probe.S);
+    }
+
+    const grab = async (S, t) => {
       await evaluate(S, `(async () => { window.seek(${t}); await Promise.race([new Promise(r => requestAnimationFrame(() => r())), new Promise(r => setTimeout(r, 500))]); })()`);
-      const shot = await S('Page.captureScreenshot', usePng || stills ? { format: 'png' } : { format: 'jpeg', quality: 92 });
+      const shot = await withTimeout(S('Page.captureScreenshot', usePng || stills ? { format: 'png' } : { format: 'jpeg', quality: 92 }),
+        60000, `Chrome did not return a screenshot for t=${t}s within 60 s (is the scene stuck, or the viewport too small?)`);
       return Buffer.from(shot.data, 'base64');
     };
 
+    // ---- stills (+ optional contact sheet)
     if (stills) {
       fs.mkdirSync(out, { recursive: true });
+      const files = [];
       for (const t of stills) {
         const file = path.join(out, `frame_${t.toFixed(2).padStart(6, '0')}s.png`);
-        fs.writeFileSync(file, await grab(t));
+        fs.writeFileSync(file, await grab(probe.S, t));
+        files.push(file);
         console.error('wrote ' + file);
+      }
+      if (o.sheet && files.length > 1) {
+        const cols = Math.min(files.length, files.length > 4 ? 3 : 2);
+        const rows = Math.ceil(files.length / cols);
+        const cellW = Math.min(width, Math.floor(1920 / cols / 2) * 2), cellH = Math.round(cellW * height / width / 2) * 2;
+        const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+        files.forEach((f) => args.push('-i', f));
+        const prep = files.map((_, i) => `[${i}:v]scale=${cellW}:${cellH},drawtext=text='${stills[i]}s':x=8:y=8:fontsize=${Math.round(cellH / 14)}:fontcolor=white:box=1:boxcolor=black@0.5[v${i}]`);
+        // drawtext needs a font build of ffmpeg; fall back to a plain sheet if it is missing
+        const layout = files.map((_, i) => `${(i % cols) * cellW}_${Math.floor(i / cols) * cellH}`).join('|');
+        const build = (labels) => [...args, '-filter_complex',
+          (labels ? prep : files.map((_, i) => `[${i}:v]scale=${cellW}:${cellH}[v${i}]`)).join(';') + ';' +
+          files.map((_, i) => `[v${i}]`).join('') + `xstack=inputs=${files.length}:layout=${layout}:fill=black[o]`,
+          '-map', '[o]', '-frames:v', '1', path.join(out, 'sheet.png')];
+        let r = spawnSync('ffmpeg', build(true));
+        if (r.status !== 0) r = spawnSync('ffmpeg', build(false));
+        if (r.status !== 0) console.error('could not build the contact sheet: ' + r.stderr);
+        else console.error(`wrote ${path.join(out, 'sheet.png')} (${cols}x${rows})`);
       }
       return;
     }
 
     // ---- video
     const total = Math.max(1, Math.round((t1 - t0) * fps));
+    const nWorkers = Math.min(workers, total);
+    fs.rmSync(workDir, { recursive: true, force: true });
+    fs.mkdirSync(workDir, { recursive: true });
     fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
-    const tmpOut = out.replace(/\.mp4$/i, '') + '.partial.mp4';
-    const vf = [];
-    if (scale !== 1) vf.push(`scale=${width}:${height}:flags=lanczos`);
-    vf.push('format=yuv420p');
-    const ffArgs = ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', usePng ? 'png' : 'mjpeg', '-i', '-'];
-    if (o.audio && o.audio !== true) ffArgs.push('-i', o.audio);
-    ffArgs.push('-vf', vf.join(','), '-r', String(fps), '-c:v', 'libx264', '-preset', String(o.preset && o.preset !== true ? o.preset : 'veryfast'),
-      '-crf', String(num(o.crf, 18)), '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
-    if (o.audio && o.audio !== true) ffArgs.push('-c:a', 'aac', '-b:a', '192k', '-shortest');
-    ffArgs.push(tmpOut);
+    const crf = num(o.crf, 18);
+    const preset = o.preset && o.preset !== true ? String(o.preset) : 'veryfast';
 
-    const ff = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] });
-    let ffFailed = null;
-    ff.on('error', (e) => { ffFailed = e.code === 'ENOENT' ? 'ffmpeg not found on PATH' : String(e); });
-    ff.stdin.on('error', () => { /* surfaced through the exit code */ });
-    const ffExit = new Promise((resolve) => ff.on('close', resolve));
+    const encoder = () => {
+      if (alpha && ext === '.webm') return { vf: 'format=yuva420p', args: ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-crf', String(Math.max(crf + 6, 24)), '-b:v', '0', '-auto-alt-ref', '0', '-row-mt', '1', '-deadline', 'good', '-cpu-used', '4'] };
+      if (alpha) return { vf: 'format=yuva444p10le', args: ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le', '-vendor', 'apl0'] };
+      return { vf: 'format=yuv420p', args: ['-c:v', 'libx264', '-preset', preset, '-crf', String(crf), '-pix_fmt', 'yuv420p', '-movflags', '+faststart'] };
+    };
 
+    let done = 0;
     const started = Date.now();
-    console.error(`Rendering ${total} frames (${t0}s to ${(t0 + total / fps).toFixed(2)}s) at ${width}x${height}${scale !== 1 ? ` (captured at ${scale}x)` : ''}, ${fps} fps`);
-    for (let i = 0; i < total; i++) {
-      if (ffFailed) break;
-      const buf = await grab(t0 + i / fps);
-      if (!ff.stdin.write(buf)) await once(ff.stdin, 'drain');
-      if (i % 10 === 9 || i === total - 1) {
-        const rate = (i + 1) / ((Date.now() - started) / 1000);
-        process.stderr.write(`\r  frame ${i + 1}/${total}  ${rate.toFixed(1)} fps  eta ${Math.max(0, Math.round((total - i - 1) / rate))}s   `);
+    const progress = () => {
+      const rate = done / ((Date.now() - started) / 1000);
+      process.stderr.write(`\r  frame ${done}/${total}  ${rate.toFixed(1)} fps  eta ${Math.max(0, Math.round((total - done) / rate))}s   `);
+    };
+
+    // Motion blur: capture `blur` sub-frames around each frame time and let ffmpeg average them (tmix),
+    // keeping every blur-th result. The shutter is centred on the frame time.
+    const renderChunk = async (S, i0, i1, file) => {
+      const enc = encoder();
+      const vf = [];
+      if (blur > 1) vf.push(`tmix=frames=${blur}`, `select='eq(mod(n,${blur}),${blur - 1})'`, 'setpts=PTS-STARTPTS');
+      if (scale !== 1) vf.push(`scale=${width}:${height}:flags=lanczos`);
+      vf.push(enc.vf);
+      const ffArgs = ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps * blur), '-c:v', usePng ? 'png' : 'mjpeg', '-i', '-',
+        '-vf', vf.join(','), '-r', String(fps), ...enc.args, file];
+      const ff = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] });
+      let ffFailed = null;
+      ff.on('error', (e) => { ffFailed = e.code === 'ENOENT' ? 'ffmpeg not found on PATH' : String(e); });
+      ff.stdin.on('error', () => { /* surfaced through the exit code */ });
+      const ffExit = new Promise((resolve) => ff.on('close', resolve));
+      for (let i = i0; i < i1 && !ffFailed; i++) {
+        for (let j = 0; j < blur; j++) {
+          const t = t0 + i / fps + (blur > 1 ? ((j + 0.5) / blur - 0.5) * shutter / fps : 0);
+          const buf = await grab(S, t);
+          if (!ff.stdin.write(buf)) await once(ff.stdin, 'drain');
+        }
+        done++;
+        if (done % 10 === 0 || done === total) progress();
       }
-    }
+      ff.stdin.end();
+      const code = await ffExit;
+      if (ffFailed) die(ffFailed);
+      if (code !== 0) die(`ffmpeg exited with code ${code}`);
+    };
+
+    // Extra Chrome instances for --workers; each renders one contiguous block of frames.
+    const pool = [probe];
+    for (let k = 1; k < nWorkers; k++) { const s = await open(software, audio); await prepare(s.S); pool.push(s); }
+    console.error(`Rendering ${total} frames (${t0}s to ${(t0 + total / fps).toFixed(2)}s) at ${width}x${height}${scale !== 1 ? ` (captured at ${scale}x)` : ''}, ${fps} fps`
+      + `${blur > 1 ? `, motion blur x${blur}` : ''}${nWorkers > 1 ? `, ${nWorkers} workers` : ''}${alpha ? ', alpha' : ''}`);
+
+    const per = Math.ceil(total / nWorkers);
+    const parts = pool.map((_, k) => path.join(workDir, `part${k}${alpha ? ext : '.mp4'}`));
+    await Promise.all(pool.map((s, k) => renderChunk(s.S, k * per, Math.min(total, (k + 1) * per), parts[k])));
     process.stderr.write('\n');
-    ff.stdin.end();
-    const code = await ffExit;
-    if (ffFailed) die(ffFailed);
-    if (code !== 0) { try { fs.rmSync(tmpOut, { force: true }); } catch { /* ignore */ } die(`ffmpeg exited with code ${code}`); }
-    fs.renameSync(tmpOut, out);
+
+    let video = parts[0];
+    if (parts.length > 1) {
+      const list = path.join(workDir, 'list.txt');
+      fs.writeFileSync(list, parts.map((p) => `file '${p.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
+      video = path.join(workDir, `merged${alpha ? ext : '.mp4'}`);
+      const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...(alpha ? [] : ['-movflags', '+faststart']), video]);
+      if (r.status !== 0) die('could not join the rendered parts: ' + r.stderr);
+    }
+    if (audioFile) {
+      const final = path.join(workDir, `final${alpha ? ext : '.mp4'}`);
+      const ac = ext === '.webm' ? ['-c:a', 'libopus', '-b:a', '160k'] : ['-c:a', 'aac', '-b:a', '192k'];
+      const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', video, '-ss', String(t0), '-i', audioFile, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', ...ac, '-shortest', ...(ext === '.mp4' ? ['-movflags', '+faststart'] : []), final]);
+      if (r.status !== 0) die('could not add the audio track: ' + r.stderr);
+      video = final;
+    }
+    fs.renameSync(video, out);
     console.error(`Done: ${out}  (${((Date.now() - started) / 1000).toFixed(1)} s)`);
   } finally {
-    if (session) await session.close();
+    for (const s of sessions) await s.close();
     server.close();
+    if (workDir) { try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ } }
   }
 }
 

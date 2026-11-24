@@ -8,6 +8,7 @@
 <meta charset="utf-8">
 <title>smoke test</title>
 <style>html,body{margin:0;background:#05060a;overflow:hidden}canvas{display:block}</style>
+<script>if (new URLSearchParams(location.search).has('alpha')) document.write('<style>html,body{background:transparent!important}</style>');</script>
 <canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
@@ -69,7 +70,8 @@ function trans(x,y,z){ return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z
 // the whole scene is a pure function of time t (seconds)
 function draw(t) {
   gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.clearColor(0.02, 0.025, 0.04, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const a = new URLSearchParams(location.search).has('alpha') ? 0 : 1; // ?alpha: transparent background (render with --alpha --query alpha)
+  gl.clearColor(0.02, 0.025, 0.04, a); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   const model = mul(rotY(t * 1.2), rotX(0.5 + Math.sin(t) * 0.3));
   const view = trans(0, 0, -5 + Math.sin(t * 0.8) * 0.6);
   const mvp = mul(persp(0.9, canvas.width / canvas.height, 0.1, 50), mul(view, model));

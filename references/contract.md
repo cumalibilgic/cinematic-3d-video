@@ -9,6 +9,8 @@ dependency-free WebGL example).
 | `window.seek(t)` | yes | Draw the frame for time `t` (seconds, float) **synchronously**, then return. |
 | `window.__ready = true` | yes | Set once everything is loaded and `seek(0)` would show a complete frame. |
 | `window.__duration` | no | Length in seconds. Without it pass `--duration`. |
+| `window.__audio` | injected | With `--audio`: `{ rate, rms, low, mid, high }`, 60 samples/s, each 0..1, available before your scripts run. Read it from `seek(t)` (see `audio(t)` in `lib/math.js`). |
+| `--query "a&b=1"` | option | Appended to the page URL, so a page can switch behaviour (for example `alpha`) via `location.search`. |
 | `?live` in the URL | convention | Play as a real-time loop in a normal browser tab (`render.mjs scene.html --serve` prints the link). |
 
 ## What the renderer does
@@ -17,7 +19,10 @@ dependency-free WebGL example).
 2. Opens the page in headless Chrome at `width x height` with `deviceScaleFactor = --scale`.
 3. Waits for `window.__ready === true`.
 4. For each frame `i`: `seek(start + i/fps)`, waits one animation frame so the compositor has the new pixels,
-   captures a JPEG (q92, or PNG with `--png`) and writes it to ffmpeg's stdin.
+   captures a JPEG (q92, or PNG with `--png`/`--alpha`) and writes it to ffmpeg's stdin. With `--blur N` it captures
+   N sub-frames around the frame time (so `seek` may be called with times slightly before `start`, or beyond the
+   end; hold values outside your timeline, as `seg()` and `keys()` do) and ffmpeg averages them. With `--workers N`
+   different blocks of frames go to different Chrome instances and the parts are joined without re-encoding.
 5. ffmpeg encodes H.264 (`yuv420p`, `+faststart`) into a `.partial.mp4` that is renamed only when ffmpeg exits cleanly,
    so a stopped render never leaves a file that looks finished.
 

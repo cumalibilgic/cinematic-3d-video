@@ -51,3 +51,17 @@ export function rng(seed = 1) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/**
+ * Loudness of the soundtrack at time t, when the video is rendered with `--audio track.mp3`.
+ * render.mjs injects window.__audio = { rate, rms, low, mid, high } (60 samples/s, each 0..1) before the page loads.
+ * Returns zeros without audio, so the same scene still renders silently. Pure function of t, like everything else.
+ *   const { low } = audio(t);  mesh.scale.setScalar(1 + low * 0.25);   // pulse on the bass
+ */
+export function audio(t) {
+  const A = typeof window !== 'undefined' ? window.__audio : null;
+  if (!A || !A.rms.length) return { rms: 0, low: 0, mid: 0, high: 0 };
+  const x = Math.max(0, t) * A.rate, i = Math.min(A.rms.length - 1, Math.floor(x)), j = Math.min(A.rms.length - 1, i + 1), f = x - Math.floor(x);
+  const at = (k) => lerp(A[k][i], A[k][j], f);
+  return { rms: at('rms'), low: at('low'), mid: at('mid'), high: at('high') };
+}

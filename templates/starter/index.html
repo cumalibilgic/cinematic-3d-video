@@ -28,7 +28,7 @@
 <div id="title" style="opacity:0">YOUR TITLE<small>SUBTITLE GOES HERE</small></div>
 
 <script type="module">
-import { THREE, createStage, installTimeline, ease, seg, keys, rng, clamp01 } from './lib/stage.js';
+import { THREE, createStage, installTimeline, ease, seg, keys, rng, clamp01, audio } from './lib/stage.js';
 
 const DURATION = 8; // seconds
 
@@ -103,9 +103,11 @@ function update(t) {
   hero.scale.setScalar(Math.max(0.0001, reveal));
   hero.rotation.set(t * 0.35, t * 0.6, 0);
 
+  // Rendered with `--audio track.mp3`, the rings pulse on the bass; without audio low is 0 and nothing changes.
+  const { low } = audio(t);
   rings.forEach((r, i) => {
     r.rotation.z = t * (0.25 + i * 0.12) * (i % 2 ? -1 : 1);
-    r.scale.setScalar(seg(t, 0.8 + i * 0.25, 1.4, ease.outExpo));
+    r.scale.setScalar(seg(t, 0.8 + i * 0.25, 1.4, ease.outExpo) * (1 + low * 0.08));
   });
 
   rimA.position.set(Math.cos(t * 0.8) * 5, 2.5, Math.sin(t * 0.8) * 5);

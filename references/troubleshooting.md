@@ -8,6 +8,10 @@ Look at the lines printed above that message: page exceptions, `[load failed]` l
 - A `GLTFLoader`/texture request that 404s: the file is outside the served folder. Put assets next to `index.html` (or pass `--root`).
 
 ## Offline / vendored Three.js
+Usually nothing to do: the renderer caches remote files (the CDN's Three.js, fonts, models) in
+`~/.cache/cinematic-3d-video` the first time it sees them and serves them from disk afterwards (`--cache-dir` moves it,
+`--no-cache` disables it). Only the first render on a machine needs internet. To work fully offline from the start, or to
+ship a self-contained folder, vendor Three.js:
 ```bash
 cd my-video && npm init -y && npm i three@0.170.0
 ```
@@ -27,6 +31,7 @@ Then in `index.html` change the import map to:
 - The log line `WebGL renderer: ... SwiftShader` means software rendering (no GPU access). That is 10-50x slower. On a
   normal desktop with a GPU it should show your graphics card (`ANGLE (NVIDIA ... RTX ...)`). If it does not, update the
   GPU driver, close other Chrome headless instances, or try `--gl gpu` to see the real error instead of silently falling back.
+- No GPU and several CPU cores: `--workers 4` renders different parts of the video in parallel Chrome instances.
 - Lower the cost per frame: `--scale 1` while iterating, shadow `mapSize` 1024, fewer particles, lower bloom resolution.
 - `--crf 18 --preset veryfast` is the default; slower presets cost minutes for tiny gains. For small files raise `--crf` (23-28).
 - Time budget: `frames x seconds-per-frame`. Measure with `--stills` or a 2-second `--start/--end` range first.
@@ -35,7 +40,11 @@ Then in `index.html` change the import map to:
 - `--width` and `--height` must be even (H.264 `yuv420p`).
 - 4K: `--width 3840 --height 2160` works if the GPU has the memory; first test a still at that size.
 - Vertical: `--width 1080 --height 1920`. Make the scene respond to aspect ratio (`camera.aspect = w/h` is set from `innerWidth/innerHeight`; widen the FOV or pull the camera back for portrait).
-- Transparent background / alpha video is not supported by this pipeline. Render on a flat colour and key it, or render PNG stills.
+- Transparent video: `--alpha --out clip.webm` (VP9) or `clip.mov` (ProRes 4444). The page itself must be transparent:
+  Three.js needs `new WebGLRenderer({ alpha: true })`, no `scene.background`, and `html, body { background: transparent }`.
+  The starter's bloom/OutputPass chain has not been verified with alpha; if edges look wrong, render without bloom.
+- Viewports shorter than about 160 px make headless Chrome stop answering screenshot requests. The renderer refuses
+  `--height` below 160 (and a screenshot that takes over 60 s aborts with a message instead of hanging).
 
 ## Platform notes
 - **Windows:** Chrome and Edge are found automatically. Use PowerShell or CMD with backslashes
